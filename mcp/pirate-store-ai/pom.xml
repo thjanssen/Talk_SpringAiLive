@@ -7,20 +7,20 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.1.1</version>
+        <version>4.2.0-RC1</version>
         <relativePath/>
     </parent>
 
     <groupId>com.thorben.janssen</groupId>
-    <artifactId>pirate-store-ai</artifactId>
+    <artifactId>pirate-store-mcp-ai</artifactId>
     <version>0.1.0</version>
-    <name>pirate-store-ai</name>
+    <name>pirate-store-mcp-ai</name>
     <description>AI support assistant for the Pirate Store demo: a Spring AI ChatClient (RAG + MCP tools)
         exposed as a REST endpoint for the pirate-store application's chat UI to call.</description>
 
     <properties>
         <java.version>21</java.version>
-        <spring-ai.version>2.0.1</spring-ai.version>
+        <spring-ai.version>2.1.0-RC1</spring-ai.version>
     </properties>
 
     <dependencyManagement>
@@ -63,6 +63,10 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-vector-store-advisor</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-session-advisor</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

@@ -1,4 +1,10 @@
-# Pirate Store
+# Pirate Store: starting point
+
+This is the starting point for the live coding session. The shop, the chat
+window and the confirmation card are ready, but the assistant only replies with
+a fixed sentence. It starts without an API key. The finished application is in
+[`../pirate-store`](../pirate-store); parts of the text below describe that
+finished state.
 
 A small, fully local pirate-themed online shop built with Spring Boot and
 Vaadin. It is the starting point for a later live-coding session that adds a
@@ -31,8 +37,8 @@ Run the tests with:
 | --- | --- |
 | Java | 21 |
 | Maven (via wrapper) | 3.9.9 |
-| Spring Boot | 4.1.1 |
-| Vaadin | 25.2.6 (`vaadin-core`, no Pro components) |
+| Spring Boot | 4.2.0-RC1 |
+| Vaadin | 25.3.5 (`vaadin-core`, no Pro components) |
 | H2 | provided by Spring Boot's dependency management |
 
 ## Architecture overview
@@ -48,7 +54,7 @@ com.thorben.janssen.piratestore
 ├── order                       -- CustomerOrder, OrderItem (immutable snapshot), OrderService,
 │                                   CheckoutCommand DTO, OrderNumberGenerator
 ├── support                     -- SupportAssistantService interface + StubSupportAssistantService,
-│                                   CartAssistantActionService + PendingCartAction(Store),
+│                                   CartAssistantTools + CartChangePreviewService (confirmed cart changes),
 │                                   SupportChatPanel (the chat UI component)
 ├── ui                          -- MainLayout, ProductView, CartView, CheckoutView, OrderConfirmationView
 └── config                      -- DemoDataInitializer (idempotent, by SKU)
@@ -56,12 +62,12 @@ com.thorben.janssen.piratestore
 
 **Business logic lives in services, not views.** Every view is a thin
 Vaadin component that calls `ProductService` / `CartService` / `OrderService`
-/ `CartAssistantActionService` and renders their results; none of them sum
+and renders their results; none of them sum
 prices or apply business rules themselves.
 
 **Session isolation.** `ShoppingSession` is a `@VaadinSessionScope` bean that
 generates a random `ownerKey` (and `conversationId`) once per browser
-session. Every `CartService` / `OrderService` / `CartAssistantActionService`
+session. Every `CartService` / `OrderService`
 method takes `ownerKey` as an explicit parameter -- there is no method that
 looks up "the" active cart without it, and the UI, the chat panel, and (later)
 AI tools all read `ownerKey` from `ShoppingSession`, never from a URL, a
@@ -81,18 +87,15 @@ registry is simpler to get right and equally forward-compatible with an
 async AI implementation (listener callbacks already wrap updates in
 `UI.access`).
 
-**Confirmation gate for assistant actions.** `CartAssistantActionService`
-is the only way a (future) AI tool can change a cart. `proposeAdd` /
-`proposeQuantityChange` / `proposeRemoval` only *read* the cart and create an
-in-memory `PendingCartAction` (via the session-scoped `PendingCartActionStore`);
-`confirm` re-validates product availability, stock, and the current cart
-quantity against live data (not the snapshot from proposal time) before
-calling the regular `CartService`, and rejects actions that are missing,
-already resolved, or owned by a different session. `SupportChatPanel`
-already renders the "Confirm"/"Cancel" UI for a `PendingCartActionView`, but
-since the stub assistant never produces one, this path is exercised by the
-service-level tests today and will come alive once a real AI implementation
-starts proposing changes.
+**Confirmation gate for assistant actions.** The cart tools in
+`CartAssistantTools` are marked `@Tool(requiresConfirmation = true)`, so Spring
+AI pauses the tool-calling loop before they run and returns the reply to
+`SupportAssisstantService`. `ShoppingSession` keeps that reply on the server, and
+`SupportChatPanel` shows a card with a preview from `CartChangePreviewService`.
+Only "Confirm" runs the tool, and `CartService` checks stock and availability
+again at that point. A call that cannot succeed is declined before the card
+appears, so the assistant explains the problem instead. The flow is covered by
+`CartConfirmationFlowTest` with a scripted model.
 
 ## Deliberate simplifications (not specified in detail by the documents)
 
@@ -123,7 +126,7 @@ Vaadin/Spring Boot combination. That workaround backfired: production mode
 requires a pre-built frontend bundle, and an IDE "Run" that compiles classes
 without invoking the `vaadin-maven-plugin` never creates one, causing "Unable
 to find index.html" / HTTP 500 on the very first request. With the current
-Spring Boot 4.1 / Vaadin 25.2 pairing that original license issue no longer
+Spring Boot 4.2 / Vaadin 25.3 pairing that original license issue no longer
 occurs, so development mode is the default again, exactly like a standard
 Vaadin + Spring Boot project.
 
@@ -142,10 +145,12 @@ flipped by hand.
 
 ## Spring Boot 4 / Vaadin 25 migration notes
 
-The project was upgraded from Spring Boot 3.5 / Vaadin 24.10 to the current
-stable Spring Boot 4.1 / Vaadin 25.2 line (Vaadin 25 targets Spring Boot 4;
-mixing Vaadin 25 with Spring Boot 3.5, or Vaadin 24 with Spring Boot 4,
-causes classpath/bean-definition conflicts -- keep the major lines paired).
+The project was upgraded from Spring Boot 3.5 / Vaadin 24.10 to the
+Spring Boot 4.1 / Vaadin 25.2 line, and later to Spring Boot 4.2 / Vaadin 25.3
+(Vaadin 25.2 manages JUnit versions that conflict with Spring Boot 4.2's).
+Vaadin 25 targets Spring Boot 4; mixing Vaadin 25 with Spring Boot 3.5, or
+Vaadin 24 with Spring Boot 4, causes classpath/bean-definition conflicts --
+keep the major lines paired.
 Application code needed no changes. Two dependency-level adjustments were
 needed:
 
@@ -181,18 +186,16 @@ needed:
 
 ## Extension point for Spring AI
 
-Spring AI 2.0.1 (the current stable line) declares an explicit dependency on
-`spring-boot-autoconfigure:4.1.1` -- exactly the Spring Boot version this
-project now uses, so adding `spring-ai-bom` 2.0.1 needs no further version
-juggling.
+Spring AI 2.1.0-RC1 is built against Spring Boot 4.2.0-RC1 -- exactly the
+Spring Boot version this project now uses, so adding `spring-ai-bom` 2.1.0-RC1
+needs no further version juggling.
 
 Replace `com.thorben.janssen.piratestore.support.StubSupportAssistantService`
 (or add a new `SupportAssistantService` bean and remove the stub) with a
 `ChatClient`-backed implementation. `SupportChatPanel` depends only on the
 `SupportAssistantService` interface, so no UI code needs to change. Expose
-`searchProducts`, `getCurrentCart`, `proposeAddProduct`,
-`proposeChangeQuantity`, `proposeRemoveProduct`, and `getOrder` as tools on a
+`searchProducts`, `getCurrentCart`, `addToCart`,
+`changeQuantity`, `removeFromCart`, and `getOrder` as tools on a
 session-scoped tool object that reads `ownerKey` from `ShoppingSession`
-(never as a tool parameter); route every write through
-`CartAssistantActionService` so the existing confirm/cancel flow keeps
-enforcing the application-controlled confirmation the requirements call for.
+(never as a tool parameter); mark every tool that writes with
+`requiresConfirmation = true`, so the user has to confirm it first.

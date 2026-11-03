@@ -16,6 +16,7 @@ import org.springframework.core.io.support.ResourcePatternResolver;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
@@ -59,6 +60,7 @@ public class IngestionPipeline {
 
     private File getVectorStoreFile() throws IOException {
         Path path = Paths.get("rag");
+        Files.createDirectories(path);
         String absolutePath = path.toFile().getAbsolutePath() + "/vectorstore.json";
         return new File(absolutePath);
     }

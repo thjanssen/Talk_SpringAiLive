@@ -5,7 +5,6 @@ import com.thorben.janssen.piratestore.cart.CartService;
 import com.thorben.janssen.piratestore.cart.CartSummary;
 import com.thorben.janssen.piratestore.cart.CartUpdateBroadcaster;
 import com.thorben.janssen.piratestore.session.ShoppingSession;
-import com.thorben.janssen.piratestore.support.cartaction.CartAssistantActionService;
 import com.thorben.janssen.piratestore.support.SupportAssisstantService;
 import com.thorben.janssen.piratestore.support.SupportChatPanel;
 import com.vaadin.flow.component.HasElement;
@@ -40,11 +39,11 @@ public class MainLayout extends Div implements RouterLayout {
     private final SupportChatPanel chatPanel;
 
     public MainLayout(ShoppingSession shoppingSession, CartService cartService, CartUpdateBroadcaster broadcaster,
-                       SupportAssisstantService supportAssistantService, CartAssistantActionService cartAssistantActionService) {
+                       SupportAssisstantService supportAssistantService) {
         this.shoppingSession = shoppingSession;
         this.cartService = cartService;
         this.broadcaster = broadcaster;
-        this.chatPanel = new SupportChatPanel(shoppingSession, supportAssistantService, cartAssistantActionService, broadcaster);
+        this.chatPanel = new SupportChatPanel(shoppingSession, supportAssistantService, broadcaster);
 
         addClassName("app-shell");
         add(buildHeader());

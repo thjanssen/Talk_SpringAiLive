@@ -1,6 +1,7 @@
 package com.thorben.janssen.piratestore.session;
 
 import com.thorben.janssen.piratestore.support.ChatMessage;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.context.annotation.Scope;
 import org.springframework.context.annotation.ScopedProxyMode;
 import org.springframework.stereotype.Component;
@@ -24,14 +25,10 @@ import java.util.UUID;
  * in the {@code ToolContext} instead.
  *
  * <p>Uses an explicit scoped proxy (rather than the plain
- * {@code @VaadinSessionScope}) for the same reason as
- * {@code PendingCartActionStore}: it is injected into {@code SupportAssisstantService}
- * and will also be injected into the future AI tool bean (e.g.
- * {@code CartAssisstantTools}, to call {@link #recordProposedCartAction} once
- * it has proposed a change) -- both singletons wired while the application
- * starts up, before any {@code VaadinSession} exists. The proxy defers the
- * actual session lookup to when a method is called, at which point a session
- * is active.
+ * {@code @VaadinSessionScope}) because it is injected into the singleton
+ * {@code SupportAssisstantService}, which is wired while the application starts
+ * up, before any {@code VaadinSession} exists. The proxy defers the actual
+ * session lookup to when a method is called, at which point a session is active.
  */
 @Component
 @Scope(scopeName = "vaadin-session", proxyMode = ScopedProxyMode.TARGET_CLASS)
@@ -41,7 +38,7 @@ public class ShoppingSession {
     private final UUID conversationId = UUID.randomUUID();
     private final List<ChatMessage> chatHistory = new ArrayList<>();
     private final List<String> orderNumbers = new ArrayList<>();
-    private UUID proposedCartActionId;
+    private ChatResponse pausedReply;
 
     public UUID getOwnerKey() {
         return ownerKey;
@@ -71,24 +68,19 @@ public class ShoppingSession {
         return orderNumbers.contains(orderNumber);
     }
 
-    /**
-     * Records the id of a {@code PendingCartAction} an AI tool just proposed
-     * during the current chat turn, so {@code SupportAssisstantService} can
-     * attach it to the {@code SupportResponse} after the model call returns
-     * (see {@code support.CartAssisstantTools}).
-     */
-    public void recordProposedCartAction(UUID actionId) {
-        this.proposedCartActionId = actionId;
+    /** Keeps the reply that waits for the user to confirm a cart change, out of the client's reach. */
+    public void setPausedReply(ChatResponse pausedReply) {
+        this.pausedReply = pausedReply;
     }
 
-    /**
-     * Returns and clears the id recorded by {@link #recordProposedCartAction},
-     * if any. Cleared on read so a stale id from an earlier turn is never
-     * attached to an unrelated response.
-     */
-    public Optional<UUID> consumeProposedCartAction() {
-        UUID actionId = this.proposedCartActionId;
-        this.proposedCartActionId = null;
-        return Optional.ofNullable(actionId);
+    public Optional<ChatResponse> getPausedReply() {
+        return Optional.ofNullable(pausedReply);
+    }
+
+    /** Returns and clears the paused reply, so its tool calls can only run once. */
+    public Optional<ChatResponse> takePausedReply() {
+        ChatResponse reply = this.pausedReply;
+        this.pausedReply = null;
+        return Optional.ofNullable(reply);
     }
 }

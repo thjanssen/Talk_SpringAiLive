@@ -7,23 +7,23 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.1.1</version>
+        <version>4.2.0-RC1</version>
         <relativePath/>
     </parent>
 
     <groupId>com.thorben.janssen</groupId>
-    <artifactId>pirate-store</artifactId>
+    <artifactId>pirate-store-mcp-shop</artifactId>
     <version>0.1.0</version>
-    <name>pirate-store</name>
+    <name>pirate-store-mcp-shop</name>
     <description>Pirate Store demo application (Spring Boot + Vaadin), prepared for a later Spring AI integration</description>
 
     <properties>
         <java.version>21</java.version>
-        <vaadin.version>25.2.6</vaadin.version>
+        <vaadin.version>25.3.5</vaadin.version>
         <!-- Overridden to "true" by the "production" Maven profile; read into application.properties
              via resource filtering (see <resources> below). -->
         <vaadin.productionMode>false</vaadin.productionMode>
-        <spring-ai.version>2.0.1</spring-ai.version>
+        <spring-ai.version>2.1.0-RC1</spring-ai.version>
     </properties>
 
     <dependencyManagement>
@@ -108,6 +108,11 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
+        </dependency>
+        <!-- Reads the answer that pirate-store-ai streams. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webclient</artifactId>
         </dependency>
     </dependencies>
 

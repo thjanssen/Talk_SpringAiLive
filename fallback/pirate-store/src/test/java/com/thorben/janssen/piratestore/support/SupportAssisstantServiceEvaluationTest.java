@@ -3,20 +3,19 @@ package com.thorben.janssen.piratestore.support;
 import com.thorben.janssen.piratestore.cart.CartService;
 import com.thorben.janssen.piratestore.product.Product;
 import com.thorben.janssen.piratestore.product.ProductRepository;
-import com.thorben.janssen.piratestore.product.ProductService;
 import com.thorben.janssen.piratestore.session.ShoppingSession;
-import com.thorben.janssen.piratestore.support.cartaction.CartAssistantActionService;
-import com.thorben.janssen.piratestore.support.cartaction.PendingCartActionStore;
 import com.thorben.janssen.piratestore.support.tools.CartAssistantTools;
+import com.thorben.janssen.piratestore.support.tools.CartChangePreviewService;
 import com.thorben.janssen.piratestore.support.tools.ProductTools;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.evaluation.FactCheckingEvaluator;
 import org.springframework.ai.chat.evaluation.RelevancyEvaluator;
-import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.evaluation.EvaluationRequest;
 import org.springframework.ai.evaluation.EvaluationResponse;
+import org.springframework.ai.model.tool.ToolCallingManager;
+import org.springframework.ai.session.SessionService;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -38,12 +37,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * available to the test JVM.
  *
  * <p>{@link SupportAssisstantService} is not autowired directly: it
- * constructor-injects the {@code vaadin-session}-scoped {@link ShoppingSession}
- * (and, transitively via {@link CartAssistantTools}, {@link PendingCartActionStore}),
- * and no Vaadin session is active in a plain {@code @SpringBootTest} -- calling
- * a method on either scoped proxy outside of one would fail. Each test builds
- * its own instance from plain, unscoped objects instead, the same workaround
- * {@code CartAssistantActionIntegrationTest} uses for {@code PendingCartActionStore}.
+ * constructor-injects the {@code vaadin-session}-scoped {@link ShoppingSession},
+ * and no Vaadin session is active in a plain {@code @SpringBootTest}. Each test
+ * builds its own instance from a plain, unscoped session instead.
  */
 @SpringBootTest
 @Transactional
@@ -58,13 +54,15 @@ class SupportAssisstantServiceEvaluationTest {
     @Autowired
     private ProductTools productTools;
     @Autowired
-    private ChatMemory chatMemory;
+    private SessionService sessionService;
     @Autowired
     private VectorStore vectorStore;
     @Autowired
     private CartService cartService;
     @Autowired
-    private ProductService productService;
+    private CartChangePreviewService cartChangePreviewService;
+    @Autowired
+    private ToolCallingManager toolCallingManager;
     @Autowired
     private ProductRepository productRepository;
 
@@ -108,17 +106,13 @@ class SupportAssisstantServiceEvaluationTest {
     }
 
     /**
-     * Builds a fresh {@code SupportAssisstantService} from plain, unscoped
-     * collaborators -- see the class Javadoc for why the real, scoped beans
-     * cannot be used here.
+     * Builds a fresh {@code SupportAssisstantService} from a plain, unscoped
+     * session -- see the class Javadoc for why the real, scoped bean cannot be
+     * used here.
      */
     private SupportAssisstantService newSupportAssisstantService() {
-        ShoppingSession shoppingSession = new ShoppingSession();
-        CartAssistantActionService cartAssistantActionService =
-                new CartAssistantActionService(cartService, productService, new PendingCartActionStore());
-        CartAssistantTools cartAssistantTools = new CartAssistantTools(cartAssistantActionService, shoppingSession);
-
-        return new SupportAssisstantService(systemPrompt, chatClientBuilder, productTools, cartAssistantTools,
-                chatMemory, vectorStore, cartAssistantActionService, shoppingSession);
+        return new SupportAssisstantService(systemPrompt, chatClientBuilder, productTools,
+                new CartAssistantTools(cartService), sessionService, vectorStore, cartChangePreviewService,
+                toolCallingManager, new ShoppingSession());
     }
 }

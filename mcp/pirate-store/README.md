@@ -7,7 +7,7 @@ The AI-powered support assistant ("the Quartermaster") does **not** live in
 this application. This app exposes its product/cart operations as an **MCP
 server** (`/mcp`) for a separate application, [`pirate-store-ai`](../pirate-store-ai),
 which runs the actual `ChatClient` (RAG + MCP tools) and is called by
-`SupportChatPanel` over a plain REST call. See "AI architecture" below for
+`SupportChatPanel` over REST, with the answer streamed back. See "AI architecture" below for
 why, and how `ownerKey` still never becomes something the model can see or
 supply despite crossing a process boundary.
 
@@ -40,9 +40,9 @@ Run the tests with:
 | --- | --- |
 | Java | 21 |
 | Maven (via wrapper) | 3.9.9 |
-| Spring Boot | 4.1.1 |
-| Vaadin | 25.2.6 (`vaadin-core`, no Pro components) |
-| Spring AI (MCP server only) | 2.0.1 |
+| Spring Boot | 4.2.0-RC1 |
+| Vaadin | 25.3.5 (`vaadin-core`, no Pro components) |
+| Spring AI (MCP server only) | 2.1.0-RC1 |
 | H2 | provided by Spring Boot's dependency management |
 
 ## Architecture overview
@@ -57,12 +57,11 @@ com.thorben.janssen.piratestore
 │                                   chat history, order numbers -- the single source of session context
 ├── order                       -- CustomerOrder, OrderItem (immutable snapshot), OrderService,
 │                                   CheckoutCommand DTO, OrderNumberGenerator
-├── support                     -- SupportAssisstantService (HTTP client to pirate-store-ai's /chat),
-│                                   SupportChatPanel (the chat UI component)
-│   ├── cartaction               -- CartAssistantActionService + PendingCartAction(Store) -- the
-│   │                                confirmation gate; process-wide store, see its Javadoc
-│   └── tools                    -- ProductTools, CartAssisstantTools + McpToolsConfig: the MCP server
-│                                    exposed to pirate-store-ai, see "AI architecture" below
+├── support                     -- SupportAssisstantService (streaming client for pirate-store-ai),
+│                                   SupportChatPanel (the chat UI component), SupportEvent
+│   └── tools                    -- ProductTools, CartAssistantTools: the MCP server exposed to
+│                                    pirate-store-ai; CartChangePreviewService for the confirmation
+│                                    card, see "AI architecture" below
 ├── ui                          -- MainLayout, ProductView, CartView, CheckoutView, OrderConfirmationView,
 │                                   PriceLabel (shared coin-icon price display)
 └── config                      -- DemoDataInitializer (idempotent, by SKU)
@@ -70,20 +69,20 @@ com.thorben.janssen.piratestore
 
 **Business logic lives in services, not views.** Every view is a thin
 Vaadin component that calls `ProductService` / `CartService` / `OrderService`
-/ `CartAssistantActionService` and renders their results; none of them sum
+and renders their results; none of them sum
 prices or apply business rules themselves.
 
 **Session isolation.** `ShoppingSession` is a `@VaadinSessionScope` bean that
 generates a random `ownerKey` (and `conversationId`) once per browser
-session. Every `CartService` / `OrderService` / `CartAssistantActionService`
+session. Every `CartService` / `OrderService`
 method takes `ownerKey` as an explicit parameter -- there is no method that
 looks up "the" active cart without it. The UI and `SupportAssisstantService`
 read it from `ShoppingSession`; MCP tool calls (arriving from the separate
 `pirate-store-ai` process, with no Vaadin session at all) instead read it
-from an `X-Owner-Key` HTTP header via `McpOwnerKeyContext` -- see "AI
+from the `_meta` of the tool call via `McpOwnerKeyContext` -- see "AI
 architecture" below. Either way, it is never a value the model itself
 supplies: it is not a declared parameter on any tool, and the model never
-sees the header.
+sees it.
 
 **Cart change notifications.** `CartService` publishes a `CartChangedEvent`
 (`ownerKey` + `CartSummary`) through `CartUpdateBroadcaster`, a small
@@ -99,19 +98,13 @@ registry is simpler to get right and equally forward-compatible with an
 async AI implementation (listener callbacks already wrap updates in
 `UI.access`).
 
-**Confirmation gate for assistant actions.** `CartAssistantActionService` is
-the only way an AI tool can change a cart. `proposeAdd` / `proposeQuantityChange`
-/ `proposeRemoval` (exposed as MCP tools by `CartAssisstantTools`) only *read*
-the cart and create a `PendingCartAction`; `confirm` -- triggered only by the
-user clicking "Confirm" in `SupportChatPanel` -- re-validates product
-availability, stock, and the current cart quantity against live data (not the
-snapshot from proposal time) before calling the regular `CartService`, and
-rejects actions that are missing, already resolved, or owned by a different
-session. `PendingCartActionStore` is a plain, process-wide singleton (not
-session-scoped): MCP tool calls arrive with no Vaadin session bound to the
-thread at all, so isolation between owners is enforced entirely by the
-explicit `ownerKey` check in `CartAssistantActionService`, not by container
-scoping -- see the store's Javadoc.
+**Confirmation gate for assistant actions.** The cart tools only run after the
+user confirmed them. `pirate-store-ai` pauses before calling them and sends the
+waiting calls with its stream. `SupportChatPanel` shows a card with a preview
+from `CartChangePreviewService`, and "Confirm" or "Cancel" sends the decision
+back. `CartService` checks stock and availability again when the tool runs. A
+call that cannot succeed is declined before the card appears, so the assistant
+explains the problem instead.
 
 ## Deliberate simplifications (not specified in detail by the documents)
 
@@ -142,7 +135,7 @@ Vaadin/Spring Boot combination. That workaround backfired: production mode
 requires a pre-built frontend bundle, and an IDE "Run" that compiles classes
 without invoking the `vaadin-maven-plugin` never creates one, causing "Unable
 to find index.html" / HTTP 500 on the very first request. With the current
-Spring Boot 4.1 / Vaadin 25.2 pairing that original license issue no longer
+Spring Boot 4.2 / Vaadin 25.3 pairing that original license issue no longer
 occurs, so development mode is the default again, exactly like a standard
 Vaadin + Spring Boot project.
 
@@ -151,7 +144,7 @@ dev-mode tooling), use the `production` Maven profile:
 
 ```bash
 ./mvnw clean package -Pproduction
-java -jar target/pirate-store-0.1.0.jar
+java -jar target/pirate-store-mcp-shop-0.1.0.jar
 ```
 
 `vaadin.productionMode` in `application.properties` is filled in via Maven
@@ -161,10 +154,12 @@ flipped by hand.
 
 ## Spring Boot 4 / Vaadin 25 migration notes
 
-The project was upgraded from Spring Boot 3.5 / Vaadin 24.10 to the current
-stable Spring Boot 4.1 / Vaadin 25.2 line (Vaadin 25 targets Spring Boot 4;
-mixing Vaadin 25 with Spring Boot 3.5, or Vaadin 24 with Spring Boot 4,
-causes classpath/bean-definition conflicts -- keep the major lines paired).
+The project was upgraded from Spring Boot 3.5 / Vaadin 24.10 to the
+Spring Boot 4.1 / Vaadin 25.2 line, and later to Spring Boot 4.2 / Vaadin 25.3
+(Vaadin 25.2 manages JUnit versions that conflict with Spring Boot 4.2's).
+Vaadin 25 targets Spring Boot 4; mixing Vaadin 25 with Spring Boot 3.5, or
+Vaadin 24 with Spring Boot 4, causes classpath/bean-definition conflicts --
+keep the major lines paired.
 Application code needed no changes. Two dependency-level adjustments were
 needed:
 
@@ -181,8 +176,8 @@ needed:
 
 ## Manual verification performed
 
-- `./mvnw test` -- all 28 tests green, including a full `@SpringBootTest`
-  context load (confirms the MCP server wiring in `McpToolsConfig` boots
+- `./mvnw test` -- all 27 tests green, including a full `@SpringBootTest`
+  context load (confirms the MCP server wiring boots
   correctly without any AI credentials).
 - `./mvnw spring-boot:run` from a clean checkout (`target/`, `data/`,
   `src/main/frontend/generated/` removed) -- starts in development mode,
@@ -198,62 +193,46 @@ needed:
   demo products; "Add to cart" updates the badge and cart; Cart view shows
   the correct line item, subtotal and total; "Ask the Quartermaster" opens
   the chat drawer.
-- MCP server, live: started this app alone and `curl`'d `/mcp` directly --
-  `tools/list` returns all tools with `ownerKey` absent from every schema;
-  `tools/call addProduct` without an `X-Owner-Key` header is rejected with a
-  clean error; with the header, it creates a real `PendingCartAction`.
-- Full split, live, with a real OpenAI key: started this app and
-  `pirate-store-ai` together and called `pirate-store-ai`'s `POST /chat`
-  directly -- a product question is answered correctly via the `search` MCP
-  tool and the RAG docs; "add 2 eye patches to my cart" returns a
-  `pendingAction` whose JSON shape matches `SupportResponse`/
-  `PendingCartActionView` field-for-field.
+- Full split, live, with a real OpenAI key, driven through the real UI with
+  Playwright: answers stream into the chat, RAG and memory work, and `addToCart`,
+  `changeQuantity` and `removeFromCart` show a card and only run after "Confirm".
+  "Cancel", an ignored card and a quantity above the stock leave the cart
+  unchanged, and a pending card survives a page reload.
 
 ## AI architecture: why a second application, and how `ownerKey` still stays safe
 
-The AI part (the `ChatClient`, RAG over `docs/*.md`, the system prompt) lives
-entirely in the separate [`pirate-store-ai`](../pirate-store-ai) application,
-not here. This app only exposes `ProductTools` / `CartAssisstantTools` as an
-**MCP server**, via `spring-ai-starter-mcp-server-webmvc` in `STATELESS`
-protocol mode (`support.tools.McpToolsConfig`, endpoint `/mcp`). `SupportChatPanel`
-talks to `pirate-store-ai`'s `POST /chat` through the plain HTTP client
-`SupportAssisstantService` -- no Spring AI dependency in this application at
-all, on either side of that call.
+The AI part (the `ChatClient`, RAG over `docs/*.md`, the system prompt, the
+conversation memory) lives entirely in the separate
+[`pirate-store-ai`](../pirate-store-ai) application. This app provides the
+frontend and exposes `ProductTools` / `CartAssistantTools` as an **MCP server**,
+via `spring-ai-starter-mcp-server-webmvc` in `STATELESS` protocol mode (endpoint
+`/mcp`). `SupportAssisstantService` talks to `pirate-store-ai` through a
+`WebClient` and reads the answer as a stream of `SupportEvent`s.
 
-Splitting the AI part out this way means an MCP tool call arrives here as a
-**plain HTTP request with no Vaadin session bound to the thread** -- unlike
-the earlier in-process design, `CartAssisstantTools` cannot simply read
-`ShoppingSession.getOwnerKey()`. The guardrail ("`ownerKey` never a value the
-model supplies or sees") still has to hold, so it is re-established across
-the process boundary like this:
+An MCP tool call arrives here as a **plain HTTP request with no Vaadin session
+bound to the thread**, so the tools cannot read `ShoppingSession`. The guardrail
+("`ownerKey` is never a value the model supplies or sees") is re-established
+across the process boundary like this:
 
-1. `SupportChatPanel` sends `ownerKey` (from `ShoppingSession`) as part of the
-   request **body** it POSTs to `pirate-store-ai`'s `/chat` -- a trusted,
-   server-to-server call, not something the browser or the model touches.
-2. `pirate-store-ai` stores that `ownerKey` in a `ThreadLocal`
-   (`mcp.OwnerKeyContext`) for the duration of handling that one request. Its
-   `ChatClient.call()` is synchronous and runs its whole tool-calling loop --
-   including every MCP tool call -- on that same thread.
-3. An `McpSyncHttpClientRequestCustomizer`
-   (`mcp.OwnerKeyHttpRequestCustomizer`) reads that `ThreadLocal` and attaches
-   it as an `X-Owner-Key` HTTP header to every outgoing MCP call, entirely in
-   Java code the model never runs or influences.
-4. Here, `McpToolsConfig` configures the MCP server's `WebMvcStatelessServerTransport`
-   with a `contextExtractor` that reads that header into an `McpTransportContext`.
-   `ProductTools` and `CartAssisstantTools` use Spring AI's `@McpTool`
-   annotation (rather than the generic, in-process `@Tool`), which is
-   discovered automatically by the MCP annotation scanner and, on a
-   `STATELESS` server, injects that `McpTransportContext` directly as a
-   method parameter -- excluded from the tool's JSON schema, so the model can
-   neither see nor supply it. `McpOwnerKeyContext` reads it back out.
+1. `SupportAssisstantService` sends `ownerKey` (from `ShoppingSession`) in the
+   request **body** to `pirate-store-ai` -- a trusted, server-to-server call, not
+   something the browser or the model touches.
+2. `pirate-store-ai` attaches it to the `ChatClient` call's tool context. Spring
+   AI's MCP client copies the tool context into the `_meta` of each outgoing MCP
+   tool call.
+3. Here, `@McpTool` methods receive the `McpSchema.CallToolRequest`, which is
+   excluded from the tool's JSON schema. `McpOwnerKeyContext` reads `ownerKey`
+   from its `_meta`.
 
-`STATELESS` MCP mode (rather than a persistent SSE/streamable session) is a
-deliberate choice here: every tool call is a standalone HTTP request, so the
-header above is read fresh on every single call -- there is no persistent
-connection whose `ownerKey` could go stale or leak across conversations.
+## Confirming cart changes across the two applications
 
-Verified end-to-end (both apps running locally, a real OpenAI key): a tool
-call without the header is rejected cleanly by `McpOwnerKeyContext`; a tool
-call with it correctly creates a `PendingCartAction` scoped to that
-`ownerKey`, with `ownerKey` never appearing in the tool's JSON schema at any
-point (`curl`'d directly against `/mcp`).
+The paused reply stays in `pirate-store-ai`, because whoever can change it could
+run any tool with any arguments. The cart data stays here, so the preview does
+too:
+
+1. `pirate-store-ai` ends the stream with an event that lists the waiting tool
+   calls, with their names and arguments.
+2. `CartChangePreviewService` turns them into the text and price on the card. A
+   call that cannot succeed is declined right away with the reason.
+3. "Confirm" or "Cancel" sends `POST /chat/decision`, which contains only the
+   decision. `pirate-store-ai` runs the tool calls it kept and streams the answer.

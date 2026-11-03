@@ -4,11 +4,11 @@ import com.thorben.janssen.piratestore.cart.CartChangedEvent;
 import com.thorben.janssen.piratestore.cart.CartSummary;
 import com.thorben.janssen.piratestore.cart.CartUpdateBroadcaster;
 import com.thorben.janssen.piratestore.session.ShoppingSession;
-import com.thorben.janssen.piratestore.support.cartaction.CartAssistantActionService;
-import com.thorben.janssen.piratestore.support.cartaction.PendingCartActionView;
+import com.thorben.janssen.piratestore.support.tools.CartChangePreview;
 import com.vaadin.flow.component.AttachEvent;
 import com.vaadin.flow.component.DetachEvent;
 import com.vaadin.flow.component.Key;
+import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
 import com.vaadin.flow.component.html.Div;
@@ -18,14 +18,20 @@ import com.vaadin.flow.component.icon.Icon;
 import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.orderedlayout.HorizontalLayout;
 import com.vaadin.flow.component.textfield.TextField;
+import org.springframework.ai.chat.model.ChatResponse;
+import reactor.core.Disposable;
+import reactor.core.publisher.Flux;
 
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Reusable chat window shown in {@code MainLayout} on every view. It only
- * depends on {@link SupportAssisstantService} and {@link CartAssistantActionService}.
+ * depends on {@link SupportAssisstantService}.
  */
 public class SupportChatPanel extends Div {
 
@@ -34,7 +40,6 @@ public class SupportChatPanel extends Div {
 
     private final ShoppingSession shoppingSession;
     private final SupportAssisstantService supportAssistantService;
-    private final CartAssistantActionService cartAssistantActionService;
     private final CartUpdateBroadcaster broadcaster;
     private final Consumer<CartChangedEvent> cartListener = this::onCartChanged;
 
@@ -45,12 +50,17 @@ public class SupportChatPanel extends Div {
     private final Button sendButton = new Button("Send");
 
     private CartSummary latestCartSummary;
+    private Disposable activeResponse;
+    private ChatResponse lastChunk;
+    private Div streamingBubble;
+    private Span streamingContent;
+    private final StringBuilder streamedText = new StringBuilder();
+    private Runnable closeConfirmationCard = () -> { };
 
     public SupportChatPanel(ShoppingSession shoppingSession, SupportAssisstantService supportAssistantService,
-                             CartAssistantActionService cartAssistantActionService, CartUpdateBroadcaster broadcaster) {
+                             CartUpdateBroadcaster broadcaster) {
         this.shoppingSession = shoppingSession;
         this.supportAssistantService = supportAssistantService;
-        this.cartAssistantActionService = cartAssistantActionService;
         this.broadcaster = broadcaster;
 
         addClassName("chat-drawer");
@@ -60,6 +70,7 @@ public class SupportChatPanel extends Div {
         add(buildInputRow());
 
         shoppingSession.getChatHistory().forEach(this::renderMessage);
+        shoppingSession.getPausedReply().ifPresent(this::restoreConfirmationCard);
     }
 
     /** Opens or closes the drawer without affecting the currently displayed view. */
@@ -136,87 +147,159 @@ public class SupportChatPanel extends Div {
         shoppingSession.addChatMessage(userMessage);
         renderMessage(userMessage);
 
-        setBusy(true);
-        try {
-            SupportConversationContext context = new SupportConversationContext(
-                    shoppingSession.getOwnerKey(), shoppingSession.getConversationId());
-            SupportResponse response = supportAssistantService.respond(context, text);
+        closeConfirmationCard.run();
+        streamAnswer(() -> {
+            shoppingSession.takePausedReply().ifPresent(supportAssistantService::abandon);
+            return supportAssistantService.streamResponse(text);
+        });
+    }
 
-            if (response.hasPendingAction()) {
-                if (response.message() != null && !response.message().isEmpty()) {
-                    ChatMessage assistantMessage = ChatMessage.assistant(response.message());
-                    shoppingSession.addChatMessage(assistantMessage);
-                    renderMessage(assistantMessage);
-                }
-                renderPendingAction(response.pendingAction());
-            } else {
-                ChatMessage assistantMessage = ChatMessage.assistant(response.message());
-                shoppingSession.addChatMessage(assistantMessage);
-                renderMessage(assistantMessage);
-            }
+    /** Subscribes to an answer and renders it as it arrives, without blocking the UI thread. */
+    private void streamAnswer(Supplier<Flux<ChatResponse>> answer) {
+        setBusy(true);
+        UI ui = UI.getCurrent();
+        try {
+            activeResponse = answer.get().subscribe(
+                    chunk -> ui.access(() -> appendChunk(chunk)),
+                    error -> ui.access(() -> finishResponse(error)),
+                    () -> ui.access(() -> finishResponse(null)));
         } catch (Exception e) {
-            showError("Sorry, the Quartermaster could not answer that: " + e.getMessage());
-        } finally {
+            finishResponse(e);
+        }
+    }
+
+    /** Runs under the session lock for every chunk of the streamed answer. */
+    private void appendChunk(ChatResponse chunk) {
+        lastChunk = chunk;
+        String text = SupportAssisstantService.textOf(chunk);
+        if (text.isEmpty()) {
+            return;
+        }
+        if (streamingBubble == null) {
+            loadingIndicator.setVisible(false);
+            streamingContent = createContent("");
+            streamingBubble = createBubble(ChatRole.ASSISTANT, streamingContent);
+            messageList.add(streamingBubble);
+        }
+        streamedText.append(text);
+        streamingContent.setText(streamedText.toString());
+        scrollToBottom();
+    }
+
+    private void finishResponse(Throwable error) {
+        if (streamingBubble != null) {
+            ChatMessage assistantMessage = ChatMessage.assistant(streamedText.toString());
+            shoppingSession.addChatMessage(assistantMessage);
+            streamingBubble.add(createTimestamp(assistantMessage));
+        }
+        ChatResponse last = lastChunk;
+        lastChunk = null;
+        streamingBubble = null;
+        streamingContent = null;
+        streamedText.setLength(0);
+        activeResponse = null;
+
+        if (error != null) {
+            showError("Sorry, the Quartermaster could not answer that: " + error.getMessage());
+        } else if (last != null && supportAssistantService.isPaused(last)) {
+            askForConfirmation(last);
+        }
+        if (activeResponse == null) {
             setBusy(false);
+        }
+        scrollToBottom();
+    }
+
+    /**
+     * Shows the paused cart changes for confirmation. If one of them cannot
+     * succeed, it declines them right away, so the assistant explains why.
+     */
+    private void askForConfirmation(ChatResponse pausedReply) {
+        List<CartChangePreview> previews;
+        try {
+            previews = supportAssistantService.previewPausedCalls(pausedReply);
+        } catch (RuntimeException e) {
+            streamAnswer(() -> supportAssistantService.reject(pausedReply, e.getMessage()));
+            return;
+        }
+        shoppingSession.setPausedReply(pausedReply);
+        renderConfirmationCard(previews);
+    }
+
+    /** Shows a pending confirmation again after the page was reloaded. */
+    private void restoreConfirmationCard(ChatResponse pausedReply) {
+        try {
+            renderConfirmationCard(supportAssistantService.previewPausedCalls(pausedReply));
+        } catch (RuntimeException e) {
+            showError(e.getMessage());
         }
     }
 
     private void renderMessage(ChatMessage message) {
-        Div bubble = new Div();
-        bubble.addClassName("chat-message");
-        bubble.addClassName(message.role() == ChatRole.USER ? "chat-message-user" : "chat-message-assistant");
-
-        Span content = new Span(message.content());
-        content.addClassName("chat-message-text");
-        Span timestamp = new Span(TIME_FORMAT.format(message.timestamp()));
-        timestamp.addClassName("chat-message-time");
-
-        bubble.add(content, timestamp);
+        Div bubble = createBubble(message.role(), createContent(message.content()));
+        bubble.add(createTimestamp(message));
         messageList.add(bubble);
         scrollToBottom();
     }
 
-    private void renderPendingAction(PendingCartActionView action) {
+    private Div createBubble(ChatRole role, Span content) {
+        Div bubble = new Div(content);
+        bubble.addClassName("chat-message");
+        bubble.addClassName(role == ChatRole.USER ? "chat-message-user" : "chat-message-assistant");
+        return bubble;
+    }
+
+    private Span createContent(String text) {
+        Span content = new Span(text);
+        content.addClassName("chat-message-text");
+        return content;
+    }
+
+    private Span createTimestamp(ChatMessage message) {
+        Span timestamp = new Span(TIME_FORMAT.format(message.timestamp()));
+        timestamp.addClassName("chat-message-time");
+        return timestamp;
+    }
+
+    private void renderConfirmationCard(List<CartChangePreview> previews) {
         Div card = new Div();
         card.addClassName("chat-action-card");
 
-        Paragraph description = new Paragraph(action.description() + " (" + formatSignedPrice(action.priceImpact()) + ")");
-        description.addClassName("chat-action-description");
+        for (CartChangePreview preview : previews) {
+            Paragraph description = new Paragraph(preview.description() + " (" + formatSignedPrice(preview.priceImpact()) + ")");
+            description.addClassName("chat-action-description");
+            card.add(description);
+        }
 
         Button confirmButton = new Button("Confirm");
         confirmButton.addThemeVariants(ButtonVariant.LUMO_SUCCESS, ButtonVariant.LUMO_SMALL);
         Button cancelButton = new Button("Cancel");
         cancelButton.addThemeVariants(ButtonVariant.LUMO_ERROR, ButtonVariant.LUMO_SMALL, ButtonVariant.LUMO_TERTIARY);
 
-        confirmButton.addClickListener(event -> {
-            try {
-                CartSummary summary = cartAssistantActionService.confirm(shoppingSession.getOwnerKey(), action.actionId());
-                confirmButton.setEnabled(false);
-                cancelButton.setEnabled(false);
-                ChatMessage confirmation = ChatMessage.assistant("Done! Your cart now has "
-                        + summary.totalQuantity() + " item(s) for a total of " + summary.totalPrice() + " gold coins.");
-                shoppingSession.addChatMessage(confirmation);
-                renderMessage(confirmation);
-            } catch (Exception e) {
-                showError(e.getMessage());
-            }
-        });
-        cancelButton.addClickListener(event -> {
-            try {
-                cartAssistantActionService.cancel(shoppingSession.getOwnerKey(), action.actionId());
-                confirmButton.setEnabled(false);
-                cancelButton.setEnabled(false);
-            } catch (Exception e) {
-                showError(e.getMessage());
-            }
-        });
+        closeConfirmationCard = () -> {
+            confirmButton.setEnabled(false);
+            cancelButton.setEnabled(false);
+        };
+        confirmButton.addClickListener(event -> decide(supportAssistantService::approve));
+        cancelButton.addClickListener(event -> decide(supportAssistantService::reject));
 
         HorizontalLayout actions = new HorizontalLayout(confirmButton, cancelButton);
         actions.addClassName("chat-action-buttons");
 
-        card.add(description, actions);
+        card.add(actions);
         messageList.add(card);
         scrollToBottom();
+    }
+
+    /**
+     * Takes the paused reply out of the session before running it, because
+     * Spring AI would run the same tool calls again if it got them twice.
+     */
+    private void decide(Function<ChatResponse, Flux<ChatResponse>> decision) {
+        hideError();
+        closeConfirmationCard.run();
+        shoppingSession.takePausedReply()
+                .ifPresent(pausedReply -> streamAnswer(() -> decision.apply(pausedReply)));
     }
 
     private String formatSignedPrice(java.math.BigDecimal amount) {
@@ -251,6 +334,11 @@ public class SupportChatPanel extends Div {
     @Override
     protected void onDetach(DetachEvent detachEvent) {
         broadcaster.remove(shoppingSession.getOwnerKey(), cartListener);
+        if (activeResponse != null) {
+            activeResponse.dispose();
+            lastChunk = null;
+            finishResponse(null);
+        }
     }
 
     private void onCartChanged(CartChangedEvent event) {

@@ -7,8 +7,8 @@ package com.thorben.janssen.piratestoreai.mcp;
  * copies every {@code ToolContext} entry into the {@code _meta} of each
  * outgoing MCP tool call (see
  * {@code org.springframework.ai.mcp.ToolContextToMcpMetaConverter}), which is
- * how pirate-store's {@code CartAssisstantTools} resolve which shopping
- * session a proposed cart change belongs to -- ownerKey is never a declared
+ * how pirate-store's {@code CartAssistantTools} resolve which shopping
+ * cart a call belongs to -- ownerKey is never a declared
  * tool parameter, so the model never supplies or even sees it (see
  * pirate-store's {@code support.tools.McpOwnerKeyContext}).
  */

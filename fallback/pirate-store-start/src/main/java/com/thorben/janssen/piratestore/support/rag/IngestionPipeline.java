@@ -16,6 +16,7 @@ import org.springframework.core.io.support.ResourcePatternResolver;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
@@ -29,6 +30,28 @@ public class IngestionPipeline {
     @Autowired
     private ResourcePatternResolver resourcePatternResolver;
 
+    @Bean
+    VectorStore simpleVectorStore(EmbeddingModel embeddingModel) throws IOException {
+        var vectorStore = SimpleVectorStore.builder(embeddingModel).build();
+        var vectorStoreFile = getVectorStoreFile();
+        if (vectorStoreFile.exists()) {
+            logger.info("Start existing vector store");
+            vectorStore.load(vectorStoreFile);
+        } else {
+            logger.info("Creating new vector store");
+            for (var inputFile : getInputFiles()) {
+                var readerConfig = MarkdownDocumentReaderConfig.builder().build();
+                var reader = new MarkdownDocumentReader(inputFile, readerConfig);
+                var documents = reader.get();
+                var textSplitter = TokenTextSplitter.builder().build();
+                var chunks = textSplitter.apply(documents);
+                vectorStore.doAdd(chunks);
+                vectorStore.save(vectorStoreFile);
+            }
+        }
+        return vectorStore;
+    }
+
     public List<Resource> getInputFiles() throws IOException {
         return Arrays.asList(
                 resourcePatternResolver.getResources("classpath:/docs/*")
@@ -37,6 +60,7 @@ public class IngestionPipeline {
 
     private File getVectorStoreFile() throws IOException {
         Path path = Paths.get("rag");
+        Files.createDirectories(path);
         String absolutePath = path.toFile().getAbsolutePath() + "/vectorstore.json";
         return new File(absolutePath);
     }
