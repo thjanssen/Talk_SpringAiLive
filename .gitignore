@@ -1,0 +1,54 @@
+# Build output (Maven, Gradle)
+target/
+build/
+.gradle/
+
+# Compiled and packaged files
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+
+# Logs and JVM crash files
+*.log
+hs_err_pid*
+replay_pid*
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Eclipse
+.classpath
+.project
+.settings/
+bin/
+.factorypath
+.apt_generated/
+
+# NetBeans
+nbproject/private/
+nbbuild/
+nbdist/
+.nb-gradle/
+
+# VS Code
+.vscode/
+
+# Spring Boot DevTools / local configuration
+.env
+application-local.properties
+application-local.yml
+
+# Operating system
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Wrapper JARs belong to the project (must come after *.jar)
+!**/.mvn/wrapper/maven-wrapper.jar
+!**/gradle/wrapper/gradle-wrapper.jar
